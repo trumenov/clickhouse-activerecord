@@ -2,16 +2,15 @@
 
 module ClickhouseActiverecord
   class Tasks
-
-    delegate :connection, :establish_connection, :clear_active_connections!, to: ActiveRecord::Base
+    delegate :connection, :establish_connection, to: ActiveRecord::Base
 
     def initialize(configuration)
-      @configuration = configuration.with_indifferent_access
+      @configuration = configuration
     end
 
     def create
       establish_master_connection
-      connection.create_database @configuration["database"]
+      connection.create_database @configuration.database
     rescue ActiveRecord::StatementInvalid => e
       if e.cause.to_s.include?('already exists')
         raise ActiveRecord::DatabaseAlreadyExists
@@ -22,22 +21,38 @@ module ClickhouseActiverecord
 
     def drop
       establish_master_connection
-      connection.drop_database @configuration["database"]
+      connection.drop_database @configuration.database
     end
 
     def purge
-      clear_active_connections!
+      ActiveRecord::Base.connection_handler.clear_active_connections!(:all)
       drop
       create
     end
 
     def structure_dump(*args)
-      tables = connection.execute("SHOW TABLES FROM #{@configuration['database']}")['data'].flatten
+      establish_master_connection
 
+      # get all tables
+      tables = connection.execute("SHOW TABLES FROM #{@configuration.database} WHERE name NOT LIKE '.inner_id.%'")['data'].flatten.map do |table|
+        next if %w[schema_migrations ar_internal_metadata].include?(table)
+        connection.show_create_table(table).gsub("#{@configuration.database}.", '')
+      end.compact
+
+      # sort view to last
+      tables.sort_by! {|table| table.match(/^CREATE\s+(MATERIALIZED\s+)?VIEW/) ? 1 : 0}
+
+      # get all functions
+      functions = connection.execute("SELECT create_query FROM system.functions WHERE origin = 'SQLUserDefined'")['data'].flatten
+
+      # put to file
       File.open(args.first, 'w:utf-8') do |file|
+        functions.each do |function|
+          file.puts function + ";\n\n"
+        end
+        
         tables.each do |table|
-          next if table.match(/\.inner/)
-          file.puts connection.execute("SHOW CREATE TABLE #{table}")['data'].try(:first).try(:first).gsub("#{@configuration['database']}.", '') + ";\n\n"
+          file.puts table + ";\n\n"
         end
       end
     end
