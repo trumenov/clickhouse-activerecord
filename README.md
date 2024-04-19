@@ -1,7 +1,7 @@
 # Clickhouse::Activerecord
 
-A Ruby database ActiveRecord driver for ClickHouse. Support Rails >= 7.1.
-Support ClickHouse version from 22.0 LTS.
+A Ruby database ActiveRecord driver for ClickHouse. Support Rails >= 5.2.
+Support ClickHouse version from 20.9 LTS.
 
 ## Installation
 
@@ -50,9 +50,33 @@ class ActionView < ActiveRecord::Base
 end
 ```
 
-## Usage in Rails
+## Usage in Rails 5
 
 Add your `database.yml` connection information with postfix `_clickhouse` for you environment:
+
+```yml
+development_clickhouse:
+  adapter: clickhouse
+  database: database
+```
+
+Add to your model:
+
+```ruby
+class Action < ActiveRecord::Base
+  establish_connection "#{Rails.env}_clickhouse".to_sym
+end
+```
+
+For materialized view model add:
+```ruby
+class ActionView < ActiveRecord::Base
+  establish_connection "#{Rails.env}_clickhouse".to_sym
+  self.is_view = true
+end
+```
+
+Or global connection:
 
 ```yml
 development:
@@ -60,21 +84,7 @@ development:
   database: database
 ```
 
-Your model example:
-
-```ruby
-class Action < ActiveRecord::Base
-end
-```
-
-For materialized view model add:
-```ruby
-class ActionView < ActiveRecord::Base
-  self.is_view = true
-end
-```
-
-## Usage in Rails with second database
+## Usage in Rails 6 with second database
 
 Add your `database.yml` connection information for you environment:
 
@@ -92,31 +102,31 @@ Connection [Multiple Databases with Active Record](https://guides.rubyonrails.or
 
 ```ruby
 class Action < ActiveRecord::Base
-  establish_connection :clickhouse
+  connects_to database: { writing: :clickhouse, reading: :clickhouse }
 end
 ```
 
 ### Rake tasks
 
+**Note!** For Rails 6 you can use default rake tasks if you configure `migrations_paths` in your `database.yml`, for example: `rake db:migrate`
+
 Create / drop / purge / reset database:
  
-    $ rake db:create
-    $ rake db:drop
-    $ rake db:purge
-    $ rake db:reset
+    $ rake clickhouse:create
+    $ rake clickhouse:drop
+    $ rake clickhouse:purge
+    $ rake clickhouse:reset
 
-Or with multiple databases:
+Prepare system tables for rails:
 
-    $ rake db:create:clickhouse
-    $ rake db:drop:clickhouse
-    $ rake db:purge:clickhouse
-    $ rake db:reset:clickhouse
+    $ rake clickhouse:prepare_schema_migration_table
+    $ rake clickhouse:prepare_internal_metadata_table
     
 Migration:
 
     $ rails g clickhouse_migration MIGRATION_NAME COLUMNS
-    $ rake db:migrate
-    $ rake db:rollback
+    $ rake clickhouse:migrate
+    $ rake clickhouse:rollback
 
 ### Dump / Load for multiple using databases
 
@@ -124,11 +134,11 @@ If you using multiple databases, for example: PostgreSQL, Clickhouse.
 
 Schema dump to `db/clickhouse_schema.rb` file:
 
-    $ rake db:schema:dump:clickhouse
+    $ rake clickhouse:schema:dump
     
 Schema load from `db/clickhouse_schema.rb` file:
 
-    $ rake db:schema:load:clickhouse
+    $ rake clickhouse:schema:load
 
 For export schema to PostgreSQL, you need use:
 
@@ -155,7 +165,7 @@ Structure load from `db/clickhouse_structure.sql` file:
 
 ```ruby
 Action.where(url: 'http://example.com', date: Date.current).where.not(name: nil).order(created_at: :desc).limit(10)
-# Clickhouse Action Load (10.3ms)  SELECT actions.* FROM actions WHERE actions.date = '2017-11-29' AND actions.url = 'http://example.com' AND (actions.name IS NOT NULL)  ORDER BY actions.created_at DESC LIMIT 10
+# Clickhouse Action Load (10.3ms)  SELECT  actions.* FROM actions WHERE actions.date = '2017-11-29' AND actions.url = 'http://example.com' AND (actions.name IS NOT NULL)  ORDER BY actions.created_at DESC LIMIT 10
 #=> #<ActiveRecord::Relation [#<Action *** >]>
 
 Action.create(url: 'http://example.com', date: Date.yesterday)
@@ -165,18 +175,6 @@ Action.create(url: 'http://example.com', date: Date.yesterday)
 ActionView.maximum(:date)
 # Clickhouse (10.3ms)  SELECT maxMerge(actions.date) FROM actions
 #=> 'Wed, 29 Nov 2017'
-
-Action.where(date: Date.current).final.limit(10)
-# Clickhouse Action Load (10.3ms)  SELECT actions.* FROM actions FINAL WHERE actions.date = '2017-11-29' LIMIT 10
-#=> #<ActiveRecord::Relation [#<Action *** >]>
-
-Action.settings(optimize_read_in_order: 1).where(date: Date.current).limit(10)
-# Clickhouse Action Load (10.3ms)  SELECT actions.* FROM actions FINAL WHERE actions.date = '2017-11-29' LIMIT 10 SETTINGS optimize_read_in_order = 1
-#=> #<ActiveRecord::Relation [#<Action *** >]>
-
-User.joins(:actions).using(:group_id)
-# Clickhouse User Load (10.3ms)  SELECT users.* FROM users INNER JOIN actions USING group_id
-#=> #<ActiveRecord::Relation [#<Action *** >]>
 ```
 
 
@@ -185,20 +183,20 @@ User.joins(:actions).using(:group_id)
 Integer types are unsigned by default. Specify signed values with `:unsigned =>
 false`. The default integer is `UInt32`
 
-| Type (bit size) |                    Range                     | :limit (byte size) |
-|:----------------|:--------------------------------------------:|-------------------:|
-| Int8            |                 -128 to 127                  |                  1 | 
-| Int16           |               -32768 to 32767                |                  2 |
-| Int32           |         -2147483648 to 2,147,483,647         |                3,4 |
-| Int64           | -9223372036854775808 to 9223372036854775807] |            5,6,7,8 |
-| Int128          |                     ...                      |             9 - 15 |
-| Int256          |                     ...                      |                16+ |
-| UInt8           |                   0 to 255                   |                  1 |
-| UInt16          |                 0 to 65,535                  |                  2 |
-| UInt32          |              0 to 4,294,967,295              |                3,4 |
-| UInt64          |          0 to 18446744073709551615           |            5,6,7,8 |
-| UInt256         |                   0 to ...                   |                 8+ |
-| Array           |                     ...                      |                ... |
+| Type (bit size)    | Range | :limit (byte size) |
+| :---        |    :----:   |          ---: |
+| Int8 | -128 to 127 | 1 | 
+| Int16 | -32768 to 32767 | 2 |
+| Int32 | -2147483648 to 2,147,483,647 | 3,4 |
+| Int64 | -9223372036854775808 to 9223372036854775807] |  5,6,7,8 |
+| Int128 | ... | 9 - 15 |
+| Int256 | ... | 16+ |
+| UInt8 | 0 to 255 | 1 |
+| UInt16 | 0 to 65,535 | 2 |
+| UInt32 | 0 to 4,294,967,295 | 3,4 |
+| UInt64 | 0 to 18446744073709551615 | 5,6,7,8 |
+| UInt256 | 0 to ... | 8+ |
+| Array | ... | ... |
 
 Example:
 
@@ -238,7 +236,6 @@ Donations to this project are going directly to [PNixx](https://github.com/PNixx
 * BTC address: `1H3rhpf7WEF5JmMZ3PVFMQc7Hm29THgUfN`
 * ETH address: `0x6F094365A70fe7836A633d2eE80A1FA9758234d5`
 * XMR address: `42gP71qLB5M43RuDnrQ3vSJFFxis9Kw9VMURhpx9NLQRRwNvaZRjm2TFojAMC8Fk1BQhZNKyWhoyJSn5Ak9kppgZPjE17Zh`
-* TON address: `UQBt0-s1igIpJoEup0B1yAUkZ56rzbpruuAjNhQ26MVCaNlC`
 
 ## Development
 

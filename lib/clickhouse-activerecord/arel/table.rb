@@ -1,6 +1,6 @@
-module CoreExtensions
+module ClickhouseActiverecord
   module Arel
-    module Table
+    class Table < ::Arel::Table
       def is_view
         type_caster.is_view
       end

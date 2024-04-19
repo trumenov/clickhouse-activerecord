@@ -9,6 +9,7 @@ require 'active_support/testing/stream'
 ClickhouseActiverecord.load
 
 FIXTURES_PATH = File.join(File.dirname(__FILE__), 'fixtures')
+CLUSTER_NAME = 'test'
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure
@@ -37,12 +38,10 @@ ActiveRecord::Base.configurations = HashWithIndifferentAccess.new(
   default: {
     adapter: 'clickhouse',
     host: 'localhost',
-    port: ENV['CLICKHOUSE_PORT'] || 8123,
-    database: ENV['CLICKHOUSE_DATABASE'] || 'test',
+    port: 8123,
+    database: 'test',
     username: nil,
-    password: nil,
-    use_metadata_table: false,
-    cluster_name: ENV['CLICKHOUSE_CLUSTER'],
+    password: nil
   }
 )
 
@@ -56,18 +55,20 @@ def schema(model)
 end
 
 def clear_db
-  cluster = ActiveRecord::Base.connection_db_config.configuration_hash[:cluster_name]
+  if ActiveRecord::version >= Gem::Version.new('6')
+    cluster = ActiveRecord::Base.connection_db_config.configuration_hash[:cluster_name]
+  else
+    cluster = ActiveRecord::Base.connection_config[:cluster_name]
+  end
   pattern = if cluster
               normalized_cluster_name = cluster.start_with?('{') ? "'#{cluster}'" : cluster
 
-              "DROP TABLE %s ON CLUSTER #{normalized_cluster_name} SYNC"
+              "DROP TABLE %s ON CLUSTER #{normalized_cluster_name}"
             else
               'DROP TABLE %s'
             end
 
   ActiveRecord::Base.connection.tables.each { |table| ActiveRecord::Base.connection.execute(pattern % table) }
-rescue ActiveRecord::NoDatabaseError
-  # Ignored
 end
 
 def clear_consts

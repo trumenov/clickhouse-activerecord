@@ -6,21 +6,19 @@ module ActiveRecord
   module ConnectionAdapters
     module Clickhouse
       module SchemaStatements
-        DEFAULT_RESPONSE_FORMAT = 'JSONCompactEachRowWithNamesAndTypes'.freeze
-
         def execute(sql, name = nil, settings: {})
           do_execute(sql, name, settings: settings)
         end
 
-        def exec_insert(sql, name, _binds, _pk = nil, _sequence_name = nil, returning: nil)
+        def exec_insert(sql, name, _binds, _pk = nil, _sequence_name = nil)
           new_sql = sql.dup.sub(/ (DEFAULT )?VALUES/, " VALUES")
           do_execute(new_sql, name, format: nil)
           true
         end
 
-        def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false)
+        def exec_query(sql, name = nil, binds = [], prepare: false)
           result = do_execute(sql, name)
-          ActiveRecord::Result.new(result['meta'].map { |m| m['name'] }, result['data'], result['meta'].map { |m| [m['name'], type_map.lookup(m['type'])] }.to_h)
+          ActiveRecord::Result.new(result['meta'].map { |m| m['name'] }, result['data'])
         rescue ActiveRecord::ActiveRecordError => e
           raise e
         rescue StandardError => e
@@ -32,39 +30,18 @@ module ActiveRecord
           true
         end
 
-        # @link https://clickhouse.com/docs/en/sql-reference/statements/alter/update
         def exec_update(_sql, _name = nil, _binds = [])
-          do_execute(_sql, _name, format: nil)
-          0
+          raise ActiveRecord::ActiveRecordError, 'Clickhouse update is not supported'
         end
 
-        # @link https://clickhouse.com/docs/en/sql-reference/statements/delete
         def exec_delete(_sql, _name = nil, _binds = [])
-          log(_sql, "#{adapter_name} #{_name}") do
-            res = request(_sql)
-            begin
-              data = JSON.parse(res.header['x-clickhouse-summary'])
-              data['result_rows'].to_i
-            rescue JSONError
-              0
-            end
-          end
+          raise ActiveRecord::ActiveRecordError, 'Clickhouse delete is not supported'
         end
 
         def tables(name = nil)
           result = do_system_execute("SHOW TABLES WHERE name NOT LIKE '.inner_id.%'", name)
           return [] if result.nil?
           result['data'].flatten
-        end
-
-        def functions
-          result = do_system_execute("SELECT name FROM system.functions WHERE origin = 'SQLUserDefined'")
-          return [] if result.nil?
-          result['data'].flatten
-        end
-
-        def show_create_function(function)
-          do_execute("SELECT create_query FROM system.functions WHERE origin = 'SQLUserDefined' AND name = '#{function}'", format: nil)
         end
 
         def table_options(table)
@@ -83,15 +60,19 @@ module ActiveRecord
 
         def do_system_execute(sql, name = nil)
           log_with_debug(sql, "#{adapter_name} #{name}") do
-            res = request(sql, DEFAULT_RESPONSE_FORMAT)
-            process_response(res, DEFAULT_RESPONSE_FORMAT)
+            res = @connection.post("/?#{@config.to_param}", "#{sql} FORMAT JSONCompact", 'User-Agent' => "Clickhouse ActiveRecord #{ClickhouseActiverecord::VERSION}")
+
+            process_response(res)
           end
         end
 
-        def do_execute(sql, name = nil, format: DEFAULT_RESPONSE_FORMAT, settings: {})
+        def do_execute(sql, name = nil, format: 'JSONCompact', settings: {})
           log(sql, "#{adapter_name} #{name}") do
-            res = request(sql, format, settings)
-            process_response(res, format)
+            formatted_sql = apply_format(sql, format)
+            request_params = @config || {}
+            res = @connection.post("/?#{request_params.merge(settings).to_param}", formatted_sql, 'User-Agent' => "Clickhouse ActiveRecord #{ClickhouseActiverecord::VERSION}")
+
+            process_response(res)
           end
         end
 
@@ -111,54 +92,23 @@ module ActiveRecord
             if (duplicate = inserting.detect { |v| inserting.count(v) > 1 })
               raise "Duplicate migration #{duplicate}. Please renumber your migrations to resolve the conflict."
             end
-            do_execute(insert_versions_sql(inserting), nil, format: nil, settings: {max_partitions_per_insert_block: [100, inserting.size].max})
-          end
-        end
-
-        # Fix insert_all method
-        # https://github.com/PNixx/clickhouse-activerecord/issues/71#issuecomment-1923244983
-        def with_yaml_fallback(value) # :nodoc:
-          if value.is_a?(Array)
-            value
-          else
-            super
+            do_execute(insert_versions_sql(inserting), nil, settings: {max_partitions_per_insert_block: [100, inserting.size].max})
           end
         end
 
         private
 
-        # Make HTTP request to ClickHouse server
-        # @param [String] sql
-        # @param [String, nil] format
-        # @param [Hash] settings
-        # @return [Net::HTTPResponse]
-        def request(sql, format = nil, settings = {})
-          formatted_sql = apply_format(sql, format)
-          request_params = @connection_config || {}
-          @connection.post("/?#{request_params.merge(settings).to_param}", formatted_sql, 'User-Agent' => "Clickhouse ActiveRecord #{ClickhouseActiverecord::VERSION}")
-        end
-
         def apply_format(sql, format)
           format ? "#{sql} FORMAT #{format}" : sql
         end
 
-        def process_response(res, format)
+        def process_response(res)
           case res.code.to_i
           when 200
-            if res.body.to_s.include?("DB::Exception")
-              raise ActiveRecord::ActiveRecordError, "Response code: #{res.code}:\n#{res.body}"
-            else
-              format_body_response(res.body, format)
-            end
+            res.body.presence && JSON.parse(res.body)
           else
-            case res.body
-              when /DB::Exception:.*\(UNKNOWN_DATABASE\)/
-                raise ActiveRecord::NoDatabaseError
-              when /DB::Exception:.*\(DATABASE_ALREADY_EXISTS\)/
-                raise ActiveRecord::DatabaseAlreadyExists
-              else
-                raise ActiveRecord::ActiveRecordError, "Response code: #{res.code}:\n#{res.body}"
-            end
+            raise ActiveRecord::ActiveRecordError,
+              "Response code: #{res.code}:\n#{res.body}"
           end
         rescue JSON::ParserError
           res.body
@@ -177,13 +127,17 @@ module ActiveRecord
           Clickhouse::TableDefinition.new(self, table_name, **options)
         end
 
-        def new_column_from_field(table_name, field, _definitions)
+        def new_column_from_field(table_name, field)
           sql_type = field[1]
           type_metadata = fetch_type_metadata(sql_type)
           default = field[3]
           default_value = extract_value_from_default(default)
           default_function = extract_default_function(default_value, default)
-          ClickhouseColumn.new(field[0], default_value, type_metadata, field[1].include?('Nullable'), default_function)
+          if ActiveRecord::version >= Gem::Version.new('6')
+            ClickhouseColumn.new(field[0], default_value, type_metadata, field[1].include?('Nullable'), default_function)
+          else
+            ClickhouseColumn.new(field[0], default_value, type_metadata, field[1].include?('Nullable'), table_name, default_function)
+          end
         end
 
         protected
@@ -194,7 +148,8 @@ module ActiveRecord
 
           return data unless data.empty?
 
-          raise ActiveRecord::StatementInvalid, "Could not find table '#{table_name}'"
+          raise ActiveRecord::StatementInvalid,
+            "Could not find table '#{table_name}'"
         end
         alias column_definitions table_structure
 
@@ -227,44 +182,6 @@ module ActiveRecord
 
         def has_default_function?(default_value, default) # :nodoc:
           !default_value && (%r{\w+\(.*\)} === default)
-        end
-
-        def format_body_response(body, format)
-          return body if body.blank?
-
-          case format
-          when 'JSONCompact'
-            format_from_json_compact(body)
-          when 'JSONCompactEachRowWithNamesAndTypes'
-            format_from_json_compact_each_row_with_names_and_types(body)
-          else
-            body
-          end
-        end
-
-        def format_from_json_compact(body)
-          parse_json_payload(body)
-        end
-
-        def format_from_json_compact_each_row_with_names_and_types(body)
-          rows = body.split("\n").map { |row| parse_json_payload(row) }
-          names, types, *data = rows
-
-          meta = names.zip(types).map do |name, type|
-            {
-              'name' => name,
-              'type' => type
-            }
-          end
-
-          {
-            'meta' => meta,
-            'data' => data
-          }
-        end
-
-        def parse_json_payload(payload)
-          JSON.parse(payload, decimal_class: BigDecimal)
         end
       end
     end

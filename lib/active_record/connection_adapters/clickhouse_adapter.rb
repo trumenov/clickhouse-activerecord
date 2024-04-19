@@ -1,14 +1,12 @@
 # frozen_string_literal: true
 
-require 'arel/visitors/clickhouse'
-require 'arel/nodes/final'
-require 'arel/nodes/settings'
-require 'arel/nodes/using'
+require 'clickhouse-activerecord/arel/visitors/to_sql'
+require 'clickhouse-activerecord/arel/table'
+require 'clickhouse-activerecord/migration'
 require 'active_record/connection_adapters/clickhouse/oid/array'
 require 'active_record/connection_adapters/clickhouse/oid/date'
 require 'active_record/connection_adapters/clickhouse/oid/date_time'
 require 'active_record/connection_adapters/clickhouse/oid/big_integer'
-require 'active_record/connection_adapters/clickhouse/oid/uuid'
 require 'active_record/connection_adapters/clickhouse/schema_definitions'
 require 'active_record/connection_adapters/clickhouse/schema_creation'
 require 'active_record/connection_adapters/clickhouse/schema_statements'
@@ -45,7 +43,7 @@ module ActiveRecord
           raise ArgumentError, 'No database specified. Missing argument: database.'
         end
 
-        ConnectionAdapters::ClickhouseAdapter.new(logger, connection, config)
+        ConnectionAdapters::ClickhouseAdapter.new(logger, connection, { user: config[:username], password: config[:password], database: database }.compact, config)
       end
     end
   end
@@ -64,19 +62,12 @@ module ActiveRecord
 
   module ModelSchema
     module ClassMethods
-      delegate :final, :final!, :settings, :settings!, to: :all
-
       def is_view
         @is_view || false
       end
       # @param [Boolean] value
       def is_view=(value)
         @is_view = value
-      end
-
-      def _delete_record(constraints)
-        raise ActiveRecord::ActiveRecordError.new('Deleting a row is not possible without a primary key') unless self.primary_key
-        super
       end
     end
   end
@@ -108,7 +99,7 @@ module ActiveRecord
         datetime: { name: 'DateTime' },
         datetime64: { name: 'DateTime64' },
         date: { name: 'Date' },
-        boolean: { name: 'Bool' },
+        boolean: { name: 'UInt8' },
         uuid: { name: 'UUID' },
 
         enum8: { name: 'Enum8' },
@@ -132,24 +123,36 @@ module ActiveRecord
       include Clickhouse::SchemaStatements
 
       # Initializes and connects a Clickhouse adapter.
-      def initialize(logger, connection_parameters, config)
+      def initialize(logger, connection_parameters, config, full_config)
         super(nil, logger)
         @connection_parameters = connection_parameters
-        @connection_config = { user: config[:username], password: config[:password], database: config[:database] }.compact
-        @debug = config[:debug] || false
         @config = config
+        @debug = full_config[:debug] || false
+        @full_config = full_config
 
         @prepared_statements = false
+        if ActiveRecord::version == Gem::Version.new('6.0.0')
+          @prepared_statement_status = Concurrent::ThreadLocalVar.new(false)
+        end
 
         connect
       end
 
+      # Support SchemaMigration from v5.2.2 to v6+
+      def schema_migration # :nodoc:
+        ClickhouseActiverecord::SchemaMigration
+      end
+
       def migrations_paths
-        @config[:migrations_paths] || 'db/migrate_clickhouse'
+        @full_config[:migrations_paths] || 'db/migrate_clickhouse'
+      end
+
+      def migration_context # :nodoc:
+        ClickhouseActiverecord::MigrationContext.new(migrations_paths, schema_migration)
       end
 
       def arel_visitor # :nodoc:
-        Arel::Visitors::Clickhouse.new(self)
+        ClickhouseActiverecord::Arel::Visitors::ToSql.new(self)
       end
 
       def native_database_types #:nodoc:
@@ -163,18 +166,18 @@ module ActiveRecord
       class << self
         def extract_limit(sql_type) # :nodoc:
           case sql_type
-            when /(Nullable)?\(?String\)?/
-              super('String')
-            when /(Nullable)?\(?U?Int8\)?/
-              1
-            when /(Nullable)?\(?U?Int16\)?/
-              2
-            when /(Nullable)?\(?U?Int32\)?/
-              nil
-            when /(Nullable)?\(?U?Int64\)?/
-              8
-            else
-              super
+          when /(Nullable)?\(?String\)?/
+            super('String')
+          when /(Nullable)?\(?U?Int8\)?/
+            1
+          when /(Nullable)?\(?U?Int16\)?/
+            2
+          when /(Nullable)?\(?U?Int32\)?/
+            nil
+          when /(Nullable)?\(?U?Int64\)?/
+            8
+          else
+            super
           end
         end
 
@@ -196,7 +199,7 @@ module ActiveRecord
           super
           register_class_with_limit m, %r(String), Type::String
           register_class_with_limit m, 'Date',  Clickhouse::OID::Date
-          register_class_with_precision m, %r(datetime)i,  Clickhouse::OID::DateTime
+          register_class_with_limit m, 'DateTime',  Clickhouse::OID::DateTime
 
           register_class_with_limit m, %r(Int8), Type::Integer
           register_class_with_limit m, %r(Int16), Type::Integer
@@ -211,9 +214,6 @@ module ActiveRecord
           register_class_with_limit m, %r(UInt64), Type::UnsignedInteger
           #register_class_with_limit m, %r(UInt128), Type::UnsignedInteger #not implemnted in clickhouse
           register_class_with_limit m, %r(UInt256), Type::UnsignedInteger
-
-          m.register_type %r(bool)i, ActiveModel::Type::Boolean.new
-          m.register_type %r{uuid}i, Clickhouse::OID::Uuid.new
           # register_class_with_limit m, %r(Array), Clickhouse::OID::Array
           m.register_type(%r(Array)) do |sql_type|
             Clickhouse::OID::Array.new(sql_type)
@@ -230,7 +230,7 @@ module ActiveRecord
       def _quote(value)
         case value
         when Array
-          '[' + value.map { |v| quote(v) }.join(', ') + ']'
+          '[' + value.map { |v| _quote(v) }.join(', ') + ']'
         else
           super
         end
@@ -239,18 +239,30 @@ module ActiveRecord
       # Quoting time without microseconds
       def quoted_date(value)
         if value.acts_like?(:time)
-          zone_conversion_method = ActiveRecord.default_timezone == :utc ? :getutc : :getlocal
+          if ActiveRecord::version >= Gem::Version.new('7')
+            zone_conversion_method = ActiveRecord.default_timezone == :utc ? :getutc : :getlocal
+          else
+            zone_conversion_method = ActiveRecord::Base.default_timezone == :utc ? :getutc : :getlocal
+          end
 
           if value.respond_to?(zone_conversion_method)
             value = value.send(zone_conversion_method)
           end
         end
 
-        value.to_fs(:db)
+        if ActiveRecord::version >= Gem::Version.new('7')
+          value.to_fs(:db)
+        else
+          value.to_s(:db)
+        end
       end
 
       def column_name_for_operation(operation, node) # :nodoc:
-        visitor.compile(node)
+        if ActiveRecord::version >= Gem::Version.new('6')
+          visitor.compile(node)
+        else
+          column_name_from_arel_node(node)
+        end
       end
 
       # Executes insert +sql+ statement in the context of this connection using
@@ -279,8 +291,8 @@ module ActiveRecord
       def create_database(name)
         sql = apply_cluster "CREATE DATABASE #{quote_table_name(name)}"
         log_with_debug(sql, adapter_name) do
-          res = @connection.post("/?#{@connection_config.except(:database).to_param}", sql)
-          process_response(res, DEFAULT_RESPONSE_FORMAT)
+          res = @connection.post("/?#{@config.except(:database).to_param}", sql)
+          process_response(res)
         end
       end
 
@@ -315,28 +327,17 @@ module ActiveRecord
           raise 'Set a cluster' unless cluster
 
           distributed_options =
-            "Distributed(#{cluster}, #{@connection_config[:database]}, #{table_name}, #{sharding_key})"
+            "Distributed(#{cluster}, #{@config[:database]}, #{table_name}, #{sharding_key})"
           create_table(distributed_table_name, **options.merge(options: distributed_options), &block)
         end
-      end
-
-      def create_function(name, body)
-        fd = "CREATE FUNCTION #{apply_cluster(quote_table_name(name))} AS #{body}"
-        do_execute(fd, format: nil)
       end
 
       # Drops a ClickHouse database.
       def drop_database(name) #:nodoc:
         sql = apply_cluster "DROP DATABASE IF EXISTS #{quote_table_name(name)}"
         log_with_debug(sql, adapter_name) do
-          res = @connection.post("/?#{@connection_config.except(:database).to_param}", sql)
-          process_response(res, DEFAULT_RESPONSE_FORMAT)
-        end
-      end
-
-      def drop_functions
-        functions.each do |function|
-          drop_function(function)
+          res = @connection.post("/?#{@config.except(:database).to_param}", sql)
+          process_response(res)
         end
       end
 
@@ -345,28 +346,12 @@ module ActiveRecord
       end
 
       def drop_table(table_name, options = {}) # :nodoc:
-        query = "DROP TABLE"
-        query = "#{query} IF EXISTS " if options[:if_exists]
-        query = "#{query} #{quote_table_name(table_name)}"
-        query = apply_cluster(query)
-        query = "#{query} SYNC" if options[:sync]
-
-        do_execute(query)
+        do_execute apply_cluster "DROP TABLE#{' IF EXISTS' if options[:if_exists]} #{quote_table_name(table_name)}"
 
         if options[:with_distributed]
           distributed_table_name = options.delete(:with_distributed)
           drop_table(distributed_table_name, **options)
         end
-      end
-
-      def drop_function(name, options = {})
-        query = "DROP FUNCTION"
-        query = "#{query} IF EXISTS " if options[:if_exists]
-        query = "#{query} #{quote_table_name(name)}"
-        query = apply_cluster(query)
-        query = "#{query} SYNC" if options[:sync]
-
-        do_execute(query, format: nil)
       end
 
       def add_column(table_name, column_name, type, **options)
@@ -399,15 +384,15 @@ module ActiveRecord
       end
 
       def cluster
-        @config[:cluster_name]
+        @full_config[:cluster_name]
       end
 
       def replica
-        @config[:replica_name]
+        @full_config[:replica_name]
       end
 
       def use_default_replicated_merge_tree_params?
-        database_engine_atomic? && @config[:use_default_replicated_merge_tree_params]
+        database_engine_atomic? && @full_config[:use_default_replicated_merge_tree_params]
       end
 
       def use_replica?
@@ -415,11 +400,11 @@ module ActiveRecord
       end
 
       def replica_path(table)
-        "/clickhouse/tables/#{cluster}/#{@connection_config[:database]}.#{table}"
+        "/clickhouse/tables/#{cluster}/#{@config[:database]}.#{table}"
       end
 
       def database_engine_atomic?
-        current_database_engine = "select engine from system.databases where name = '#{@connection_config[:database]}'"
+        current_database_engine = "select engine from system.databases where name = '#{@config[:database]}'"
         res = select_one(current_database_engine)
         res['engine'] == 'Atomic' if res
       end
