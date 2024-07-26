@@ -19,12 +19,18 @@ module ActiveRecord
         end
 
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false)
-          result = do_execute(sql, name)
+          result = nil
+          begin
+            result = do_execute(sql, name)
+          rescue ActiveRecord::ActiveRecordError => e
+            raise e
+          rescue StandardError => e
+            raise ActiveRecord::ActiveRecordError.new("Response: #{e.message}")
+          end
+          raise("No [meta] key in response: [#{result.inspect}]") unless result&.key?['meta']
+          raise("No [meta] in response") unless result['meta'].present?
+          raise("No [data] in response") unless result.key?['data']
           ActiveRecord::Result.new(result['meta'].map { |m| m['name'] }, result['data'], result['meta'].map { |m| [m['name'], type_map.lookup(m['type'])] }.to_h)
-        rescue ActiveRecord::ActiveRecordError => e
-          raise e
-        rescue StandardError => e
-          raise ActiveRecord::ActiveRecordError, "Response: #{e.message}"
         end
 
         def exec_insert_all(sql, name)
