@@ -27,9 +27,9 @@ module ActiveRecord
           rescue StandardError => e
             raise ActiveRecord::ActiveRecordError.new("Response: #{e.message}")
           end
-          raise("No [meta] key in response: [#{result.inspect}]") unless result&.key?['meta']
+          raise("No [meta] key in response: [#{result.inspect}]") unless result&.key?('meta')
           raise("No [meta] in response") unless result['meta'].present?
-          raise("No [data] in response") unless result.key?['data']
+          raise("No [data] in response") unless result.key?('data')
           ActiveRecord::Result.new(result['meta'].map { |m| m['name'] }, result['data'], result['meta'].map { |m| [m['name'], type_map.lookup(m['type'])] }.to_h)
         end
 
