@@ -58,6 +58,28 @@ RSpec.describe 'Migration', :migrations do
           end
         end
 
+        context 'without id' do
+          let(:directory) { 'dsl_create_view_without_id' }
+          it 'creates a table' do
+            subject
+
+            current_schema = schema(model)
+
+            expect(current_schema.keys.count).to eq(1)
+            expect(current_schema).to_not have_key('id')
+            expect(current_schema['col'].sql_type).to eq('String')
+          end
+        end
+
+        context 'with buffer table' do
+          let(:directory) { 'dsl_table_buffer_creation' }
+          it 'creates a table' do
+            subject
+
+            expect(ActiveRecord::Base.connection.tables).to include('some_buffers')
+          end
+        end
+
         context 'with engine' do
           let(:directory) { 'dsl_table_with_engine_creation' }
           it 'creates a table' do
@@ -207,6 +229,56 @@ RSpec.describe 'Migration', :migrations do
             end
 
             expect(ActiveRecord::Base.connection.tables).not_to include('some_view')
+          end
+        end
+
+        context 'with index' do
+          let(:directory) { 'dsl_create_table_with_index' }
+
+          it 'creates a table' do
+            quietly { migration_context.up(1) }
+
+            expect(ActiveRecord::Base.connection.show_create_table('some')).to include('INDEX idx (int1 * int2, date) TYPE minmax GRANULARITY 3')
+
+            quietly { migration_context.up(2) }
+
+            expect(ActiveRecord::Base.connection.show_create_table('some')).to_not include('INDEX idx')
+
+            quietly { migration_context.up(3) }
+
+            expect(ActiveRecord::Base.connection.show_create_table('some')).to include('INDEX idx2 int1 * int2 TYPE set(10) GRANULARITY 4')
+          end
+
+          it 'add index if not exists' do
+            subject
+
+            expect { ActiveRecord::Base.connection.add_index('some', 'int1 + int2', name: 'idx2', type: 'minmax', granularity: 1) }.to raise_error(ActiveRecord::ActiveRecordError, include('already exists'))
+
+            ActiveRecord::Base.connection.add_index('some', 'int1 + int2', name: 'idx2', type: 'minmax', granularity: 1, if_not_exists: true)
+          end
+
+          it 'drop index if exists' do
+            subject
+
+            expect { ActiveRecord::Base.connection.remove_index('some', 'idx3') }.to raise_error(ActiveRecord::ActiveRecordError, include('Cannot find index'))
+
+            ActiveRecord::Base.connection.remove_index('some', 'idx2')
+          end
+
+          it 'rebuid index' do
+            subject
+
+            expect { ActiveRecord::Base.connection.rebuild_index('some', 'idx3') }.to raise_error(ActiveRecord::ActiveRecordError, include('Unknown index'))
+
+            expect { ActiveRecord::Base.connection.rebuild_index('some', 'idx3', true) }.to_not raise_error(ActiveRecord::ActiveRecordError)
+
+            ActiveRecord::Base.connection.rebuild_index('some', 'idx2')
+          end
+
+          it 'clear index' do
+            subject
+
+            ActiveRecord::Base.connection.clear_index('some', 'idx2')
           end
         end
       end

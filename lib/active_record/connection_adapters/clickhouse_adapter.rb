@@ -149,6 +149,10 @@ module ActiveRecord
         !native_database_types[type].nil?
       end
 
+      def supports_indexes_in_create?
+        true
+      end
+
       class << self
         def extract_limit(sql_type) # :nodoc:
           case sql_type
@@ -260,7 +264,7 @@ module ActiveRecord
       # @param [String] table
       # @return [String]
       def show_create_table(table)
-        do_system_execute("SHOW CREATE TABLE `#{table}`")['data'].try(:first).try(:first).gsub(/[\n\s]+/m, ' ')
+        do_system_execute("SHOW CREATE TABLE `#{table}`")['data'].try(:first).try(:first).gsub(/[\n\s]+/m, ' ').gsub("#{@config[:database]}.", "")
       end
 
       # Create a new ClickHouse database.
@@ -289,7 +293,11 @@ module ActiveRecord
         options = apply_replica(table_name, options)
         td = create_table_definition(apply_cluster(table_name), **options)
         block.call td if block_given?
-        td.column(:id, options[:id], null: false) if options[:id].present? && td[:id].blank?
+        # support old migration version: in 5.0 options id: :integer, but 7.1 options empty
+        # todo remove auto add id column in future
+        if (!options.key?(:id) || options[:id].present? && options[:id] != false) && td[:id].blank? && options[:as].blank?
+          td.column(:id, options[:id] || :integer, null: false)
+        end
 
         if options[:force]
           drop_table(table_name, options.merge(if_exists: true))
@@ -386,12 +394,49 @@ module ActiveRecord
         change_column table_name, column_name, nil, {default: default}.compact
       end
 
+      # Adds index description to tables metadata
+      # @link https://clickhouse.com/docs/en/sql-reference/statements/alter/skipping-index
+      def add_index(table_name, expression, **options)
+        index = add_index_options(apply_cluster(table_name), expression, **options)
+        execute schema_creation.accept(CreateIndexDefinition.new(index))
+      end
+
+      # Removes index description from tables metadata and deletes index files from disk
+      def remove_index(table_name, name)
+        query = apply_cluster("ALTER TABLE #{quote_table_name(table_name)}")
+        execute "#{query} DROP INDEX #{quote_column_name(name)}"
+      end
+
+      # Rebuilds the secondary index name for the specified partition_name
+      def rebuild_index(table_name, name, if_exists: false, partition: nil)
+        query = [apply_cluster("ALTER TABLE #{quote_table_name(table_name)}")]
+        query << 'MATERIALIZE INDEX'
+        query << 'IF EXISTS' if if_exists
+        query << quote_column_name(name)
+        query << "IN PARTITION #{quote_column_name(partition)}" if partition
+        execute query.join(' ')
+      end
+
+      # Deletes the secondary index files from disk without removing description
+      def clear_index(table_name, name, if_exists: false, partition: nil)
+        query = [apply_cluster("ALTER TABLE #{quote_table_name(table_name)}")]
+        query << 'CLEAR INDEX'
+        query << 'IF EXISTS' if if_exists
+        query << quote_column_name(name)
+        query << "IN PARTITION #{quote_column_name(partition)}" if partition
+        execute query.join(' ')
+      end
+
       def cluster
         @config[:cluster_name]
       end
 
       def replica
         @config[:replica_name]
+      end
+
+      def database
+        @config[:database]
       end
 
       def use_default_replicated_merge_tree_params?

@@ -93,6 +93,29 @@ module ActiveRecord
 
           args.each { |name| column(name, kind, **options.except(:limit)) }
         end
+
+        private
+
+        def valid_column_definition_options
+          super + [:array, :low_cardinality, :fixed_string, :value, :type]
+        end
+      end
+
+      class IndexDefinition
+        attr_reader :table, :name, :expression, :type, :granularity, :first, :after, :if_exists, :if_not_exists
+
+        def initialize(table, name, expression, type, granularity, first:, after:, if_exists:, if_not_exists:)
+          @table = table
+          @name = name
+          @expression = expression
+          @type = type
+          @granularity = granularity
+          @first = first
+          @after = after
+          @if_exists = if_exists
+          @if_not_exists = if_not_exists
+        end
+
       end
     end
   end
