@@ -20,8 +20,18 @@ module ActiveRecord
 
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false)
           result = nil
+          retries_count = (@config || {}).fetch(:request_retries_on_fail, 1).to_i
+          retries_count = 1 unless retries_count.positive?
           begin
-            result = do_execute(sql, name)
+            retries_count.times do |retry_num|
+              begin
+                result = do_execute(sql, name)
+                break
+              rescue => e
+                raise(e) unless (retry_num + 1) < retries_count
+                sleep(0.1 * (retry_num + 1))
+              end
+            end
           rescue ActiveRecord::ActiveRecordError => e
             raise e
           rescue StandardError => e
@@ -30,6 +40,7 @@ module ActiveRecord
           raise("No [meta] key in response: [#{result.inspect}]") unless result&.key?('meta')
           raise("No [meta] in response") unless result['meta'].present?
           raise("No [data] in response") unless result.key?('data')
+
           ActiveRecord::Result.new(result['meta'].map { |m| m['name'] }, result['data'], result['meta'].map { |m| [m['name'], type_map.lookup(m['type'])] }.to_h)
         end
 
