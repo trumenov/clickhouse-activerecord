@@ -9,7 +9,7 @@ RSpec.describe 'Cluster Migration', :migrations do
     end
     let(:directory) { raise 'NotImplemented' }
     let(:migrations_dir) { File.join(FIXTURES_PATH, 'migrations', directory) }
-    let(:migration_context) { ActiveRecord::MigrationContext.new(migrations_dir, model.connection.schema_migration, model.connection.internal_metadata) }
+    let(:migration_context) { ActiveRecord::MigrationContext.new(migrations_dir) }
 
     connection_config = ActiveRecord::Base.connection_db_config.configuration_hash
 
@@ -70,9 +70,12 @@ RSpec.describe 'Cluster Migration', :migrations do
           let(:directory) { 'dsl_create_function' }
 
           it 'creates a function' do
+            ActiveRecord::Base.connection.execute('CREATE FUNCTION forced_fun AS (x, k, b) -> k*x + b')
+
             subject
 
-            expect(ActiveRecord::Base.connection.functions).to match_array(['some_fun'])
+            expect(ActiveRecord::Base.connection.functions).to match_array(['some_fun', 'forced_fun'])
+            expect(ActiveRecord::Base.connection.show_create_function('forced_fun').chomp).to eq('CREATE OR REPLACE FUNCTION forced_fun AS (x, y) -> (x + y)')
           end
         end
       end
@@ -125,6 +128,8 @@ RSpec.describe 'Cluster Migration', :migrations do
       let(:directory) { 'dsl_create_table_with_index' }
 
       it 'creates a table' do
+
+        allow_any_instance_of(ActiveRecord::ConnectionAdapters::ClickhouseAdapter).to receive(:execute).and_call_original
 
         expect_any_instance_of(ActiveRecord::ConnectionAdapters::ClickhouseAdapter).to receive(:execute)
            .with('ALTER TABLE some ON CLUSTER ' + connection_config[:cluster_name] + ' DROP INDEX idx')

@@ -1,3 +1,100 @@
+### Version 1.6.7 (Mar 5, 2026)
+
+* Fix insert with default values in Ruby 4.0 and Rails 8.1
+
+### Version 1.6.6 (Feb 16, 2026)
+
+* Fix error: EOFError (end of file reached)
+* Method `execute_to_file` will return `Tempfile` object
+
+### Version 1.6.3 (Feb 04, 2026)
+
+* Rename method `execute_streaming` to `execute_to_file`
+
+### Version 1.6.2 (Jan 30, 2026)
+
+* Add streaming request and save response to tmp file
+
+### Version 1.6.1 (Jan 20, 2026)
+
+* Fix prepare rake task on ClickHouse 24.6
+
+### Version 1.6.0 (Jan 19, 2026)
+
+* Support CSE (Common Scalar Expressions) in the `WITH` clause
+* Fix regex to match FROM keyword, not column names containing 'from' #220
+* Add JSON column type support #209
+* Support execute_batch #216
+* Add disconnect method to adapter #186
+* Add check_current_protected_environment! to Tasks #222
+* Do not truncate engines that cannot be truncated #226
+
+### Version 1.5.1 (Nov 6, 2025)
+
+* Fix rake tasks
+
+### Version 1.5.0 (Nov 5, 2025)
+
+* 🎉 Support for Rails 8.1
+* Fix sql structure dump with `schema_migrations` #138
+* Remove old tasks
+
+### Version 1.4.0 (Sep 18, 2025)
+
+* `CREATE OR REPLACE FUNCTION` in SQL schema dumps in #198
+* Added shard config to handle replica path with shard in #201
+* Add support for simple schema dumping in #203
+* Unscope :final and :settings in #208
+* Encapsulate format logic within Statement and helper classes in #162
+
+### Version 1.3.1 (Feb 12, 2025)
+
+ * Restore replace database from dump schema table creation
+
+ ### Version 1.3.0 (Jan 24, 2025)
+
+ * 🎉 Support for Rails 8.0 #189
+ * Restore multi-line table definitions in structure dumps #187
+ * Use a flag to track updates/deletes in SQL visitor #188
+
+ ### Version 1.2.1 (Nov 18, 2024)
+
+ * Maintain primary key type specificity in #183
+ * Reliably sort functions, views, and materialized views in schema in #181
+ * Improve function dumps in #179
+ * Add support for integer limits in map type in #178
+ * Add support for `request_settings` in create_table
+
+ ### Version 1.2.0 (Oct 23, 2024)
+
+ * Fix for function creation in `structure.sql` #166
+ * Add `group_by_grouping_sets` query method #161
+ * Add support for `CREATE FUNCTION` and `CREATE OR REPLACE FUNCTION`; the later in schema loading #146
+ * Add support for `LIMIT BY` clause #169
+ * Include column definitions in schema dump if the column name is not `id` #173
+ * Add blank line after create_function in schema #170
+ * Improve DB::Exception error handling #164
+ * SchemaDumper adds materialized view destination #159
+ * Add Array support to Map #158
+ * Add support codec compression parameter #135
+
+ ### Version 1.1.3 (Sep 27, 2024)
+
+ * Fix schema dumper #163
+
+ ### Version 1.1.2 (Aug 27, 2024)
+
+* 🎉 Support for rails 7.2 #156
+* Add method `views` for getting table `View` list in #152
+* Add support for Map datatype in #144
+* Add support window named functions
+* Fix schema dumper default values for number
+* Normalize table name in schema dump in #148
+* Noop savepoint functionality in #150
+* Fix `#find_by` in #153
+* Add RSpec configure
+* Fix detect model primary key
+
 ### Version 1.0.7 (Apr 27, 2024)
 
 * Support table indexes

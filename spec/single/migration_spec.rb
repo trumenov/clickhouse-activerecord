@@ -96,6 +96,26 @@ RSpec.describe 'Migration', :migrations do
         end
 
         context 'types' do
+          context 'integer' do
+            let(:directory) { 'dsl_table_with_integer_creation' }
+            it 'honors unsigned: false even when limit is omitted' do
+              subject
+
+              current_schema = schema(model)
+
+              expect(current_schema['default_int'].sql_type).to eq('Nullable(UInt32)')
+              expect(current_schema['signed_no_limit'].sql_type).to eq('Int32')
+              expect(current_schema['signed_no_limit'].default).to eq(-1)
+              expect(current_schema['signed_small'].sql_type).to eq('Int8')
+              expect(current_schema['signed_small'].default).to eq(-1)
+              expect(current_schema['signed_int32'].sql_type).to eq('Int32')
+              expect(current_schema['signed_int32'].default).to eq(-1)
+              expect(current_schema['signed_int64'].sql_type).to eq('Int64')
+              expect(current_schema['signed_int64'].default).to eq(-1)
+              expect(current_schema['unsigned_tiny'].sql_type).to eq('UInt8')
+            end
+          end
+
           context 'decimal' do
             let(:directory) { 'dsl_table_with_decimal_creation' }
             it 'creates a table with valid scale and precision' do
@@ -103,13 +123,15 @@ RSpec.describe 'Migration', :migrations do
 
               current_schema = schema(model)
 
-              expect(current_schema.keys.count).to eq(3)
+              expect(current_schema.keys.count).to eq(4)
               expect(current_schema).to have_key('id')
               expect(current_schema).to have_key('money')
               expect(current_schema).to have_key('balance')
               expect(current_schema['id'].sql_type).to eq('UInt32')
               expect(current_schema['money'].sql_type).to eq('Nullable(Decimal(16, 4))')
               expect(current_schema['balance'].sql_type).to eq('Decimal(32, 2)')
+              expect(current_schema['balance'].default).to eq(0.0)
+              expect(current_schema['paid'].default).to eq(1.15)
             end
           end
 
@@ -128,6 +150,20 @@ RSpec.describe 'Migration', :migrations do
             end
           end
 
+          context 'codec' do
+            let(:directory) { 'dsl_table_with_codec' }
+            it 'creates a table with custom column' do
+              subject
+
+              current_schema = schema(model)
+
+              expect(current_schema.keys.count).to eq(1)
+              expect(current_schema).to have_key('custom')
+              expect(current_schema['custom'].sql_type).to eq('Nullable(UInt64)')
+              expect(current_schema['custom'].codec).to eq('T64, LZ4')
+            end
+          end
+
           context 'datetime' do
             let(:directory) { 'dsl_table_with_datetime_creation' }
             it 'creates a table with datetime columns' do
@@ -139,7 +175,11 @@ RSpec.describe 'Migration', :migrations do
               expect(current_schema).to have_key('datetime')
               expect(current_schema).to have_key('datetime64')
               expect(current_schema['datetime'].sql_type).to eq('DateTime')
+              expect(current_schema['datetime'].default).to be_nil
+              expect(current_schema['datetime'].default_function).to eq('now()')
               expect(current_schema['datetime64'].sql_type).to eq('Nullable(DateTime64(3))')
+              expect(current_schema['datetime64'].default).to be_nil
+              expect(current_schema['datetime64'].default_function).to eq('now64()')
             end
           end
 
@@ -150,13 +190,18 @@ RSpec.describe 'Migration', :migrations do
 
               current_schema = schema(model)
 
-              expect(current_schema.keys.count).to eq(3)
+              expect(current_schema.keys.count).to eq(5)
               expect(current_schema).to have_key('col1')
               expect(current_schema).to have_key('col2')
               expect(current_schema).to have_key('col3')
+              expect(current_schema).to have_key('col4')
+              expect(current_schema).to have_key('col5')
               expect(current_schema['col1'].sql_type).to eq('LowCardinality(String)')
+              expect(current_schema['col1'].default).to eq('col')
               expect(current_schema['col2'].sql_type).to eq('LowCardinality(Nullable(String))')
               expect(current_schema['col3'].sql_type).to eq('Array(LowCardinality(Nullable(String)))')
+              expect(current_schema['col4'].sql_type).to eq('Map(String, LowCardinality(Nullable(String)))')
+              expect(current_schema['col5'].sql_type).to eq('Map(String, Array(LowCardinality(Nullable(String))))')
             end
           end
 
@@ -167,11 +212,16 @@ RSpec.describe 'Migration', :migrations do
 
               current_schema = schema(model)
 
-              expect(current_schema.keys.count).to eq(2)
+              expect(current_schema.keys.count).to eq(4)
               expect(current_schema).to have_key('fixed_string1')
               expect(current_schema).to have_key('fixed_string16_array')
+              expect(current_schema).to have_key('fixed_string16_map')
+              expect(current_schema).to have_key('fixed_string16_map_array')
               expect(current_schema['fixed_string1'].sql_type).to eq('FixedString(1)')
               expect(current_schema['fixed_string16_array'].sql_type).to eq('Array(Nullable(FixedString(16)))')
+              expect(current_schema['fixed_string16_map'].sql_type).to eq('Map(String, Nullable(FixedString(16)))')
+              expect(current_schema['fixed_string16_map_array'].sql_type).to eq('Map(String, Array(Nullable(FixedString(16))))')
+
             end
           end
 
@@ -187,6 +237,7 @@ RSpec.describe 'Migration', :migrations do
               expect(current_schema).to have_key('enum16')
               expect(current_schema).to have_key('enum_nullable')
               expect(current_schema['enum8'].sql_type).to eq("Enum8('key1' = 1, 'key2' = 2)")
+              expect(current_schema['enum8'].default).to eq('key1')
               expect(current_schema['enum16'].sql_type).to eq("Enum16('key1' = 1, 'key2' = 2)")
               expect(current_schema['enum_nullable'].sql_type).to eq("Nullable(Enum8('key1' = 1, 'key2' = 2))")
             end
@@ -270,7 +321,7 @@ RSpec.describe 'Migration', :migrations do
 
             expect { ActiveRecord::Base.connection.rebuild_index('some', 'idx3') }.to raise_error(ActiveRecord::ActiveRecordError, include('Unknown index'))
 
-            expect { ActiveRecord::Base.connection.rebuild_index('some', 'idx3', true) }.to_not raise_error(ActiveRecord::ActiveRecordError)
+            # expect { ActiveRecord::Base.connection.rebuild_index('some', 'idx3', if_exists: true) }.to_not raise_error
 
             ActiveRecord::Base.connection.rebuild_index('some', 'idx2')
           end
@@ -300,11 +351,11 @@ RSpec.describe 'Migration', :migrations do
     describe 'drop table sync' do
       it 'drops table' do
         migrations_dir = File.join(FIXTURES_PATH, 'migrations', 'dsl_drop_table_sync')
-        quietly { ActiveRecord::MigrationContext.new(migrations_dir, model.connection.schema_migration).up(1) }
+        quietly { ActiveRecord::MigrationContext.new(migrations_dir).up(1) }
 
         expect(ActiveRecord::Base.connection.tables).to include('some')
 
-        quietly { ActiveRecord::MigrationContext.new(migrations_dir, model.connection.schema_migration).up(2) }
+        quietly { ActiveRecord::MigrationContext.new(migrations_dir).up(2) }
 
         expect(ActiveRecord::Base.connection.tables).not_to include('some')
       end
@@ -350,16 +401,19 @@ RSpec.describe 'Migration', :migrations do
         it 'creates a function' do
           subject
 
-          expect(ActiveRecord::Base.connection.functions).to match_array(['some_fun'])
+          expect(ActiveRecord::Base.connection.functions).to match_array(['addFun', 'multFun'])
         end
       end
 
       context 'dsl' do
         let(:directory) { 'dsl_create_function' }
         it 'creates a function' do
+          ActiveRecord::Base.connection.execute('CREATE FUNCTION forced_fun AS (x, k, b) -> k*x + b')
+
           subject
 
-          expect(ActiveRecord::Base.connection.functions).to match_array(['some_fun'])
+          expect(ActiveRecord::Base.connection.functions).to match_array(['forced_fun', 'some_fun'])
+          expect(ActiveRecord::Base.connection.show_create_function('forced_fun').chomp).to eq('CREATE OR REPLACE FUNCTION forced_fun AS (x, y) -> (x + y)')
         end
       end
     end

@@ -33,8 +33,22 @@ module ActiveRecord
           if options[:array]
             sql.gsub!(/\s+(.*)/, ' Array(\1)')
           end
+          if options[:map] == :array
+            sql.gsub!(/\s+(.*)/, ' Map(String, Array(\1))')
+          end
+          if options[:map] == true
+            sql.gsub!(/\s+(.*)/, ' Map(String, \1)')
+          end
+          if options[:codec]
+            sql.gsub!(/\s+(.*)/, " \\1 CODEC(#{options[:codec]})")
+          end
           sql.gsub!(/(\sString)\(\d+\)/, '\1')
-          sql << " DEFAULT #{quote_default_expression(options[:default], options[:column])}" if options_include_default?(options)
+
+          if ::ActiveRecord::version >= Gem::Version.new('8.1')
+            sql << " DEFAULT #{quote_default_expression_for_column_definition(options[:default], options[:column])}" if options_include_default?(options)
+          else
+            sql << " DEFAULT #{quote_default_expression(options[:default], options[:column])}" if options_include_default?(options)
+          end
           sql
         end
 
@@ -65,7 +79,9 @@ module ActiveRecord
           # If you do not specify a database explicitly, ClickHouse will use the "default" database.
           return unless subquery
 
-          match = subquery.match(/(?<=from)[^.\w]+(?<database>\w+(?=\.))?(?<table_name>[.\w]+)/i)
+          # Match FROM as a keyword (with word boundary), not as part of a column name
+          # \b ensures we only match 'from' as a whole word
+          match = subquery.match(/\bfrom\s+(?<database>\w+(?=\.))?(?<table_name>[.\w]+)/i)
           return unless match
           return if match[:database]
 

@@ -47,6 +47,14 @@ module CoreExtensions
 
         connection.select_values(sm, "#{self.class} Load")
       end
+
+      def connection
+        if ::ActiveRecord::version >= Gem::Version.new('7.2')
+          @pool.lease_connection
+        else
+          super
+        end
+      end
     end
   end
 end

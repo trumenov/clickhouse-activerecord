@@ -2,16 +2,22 @@
 
 require 'arel/visitors/clickhouse'
 require 'arel/nodes/final'
+require 'arel/nodes/grouping_sets'
 require 'arel/nodes/settings'
 require 'arel/nodes/using'
+require 'arel/nodes/limit_by'
 require 'active_record/connection_adapters/clickhouse/oid/array'
 require 'active_record/connection_adapters/clickhouse/oid/date'
 require 'active_record/connection_adapters/clickhouse/oid/date_time'
 require 'active_record/connection_adapters/clickhouse/oid/big_integer'
+require 'active_record/connection_adapters/clickhouse/oid/map'
 require 'active_record/connection_adapters/clickhouse/oid/uuid'
-require 'active_record/connection_adapters/clickhouse/schema_definitions'
+require 'active_record/connection_adapters/clickhouse/column'
+require 'active_record/connection_adapters/clickhouse/quoting'
 require 'active_record/connection_adapters/clickhouse/schema_creation'
 require 'active_record/connection_adapters/clickhouse/schema_statements'
+require 'active_record/connection_adapters/clickhouse/statement'
+require 'active_record/connection_adapters/clickhouse/table_definition'
 require 'net/http'
 require 'openssl'
 
@@ -22,30 +28,18 @@ module ActiveRecord
       def clickhouse_connection(config)
         config = config.symbolize_keys
 
-        if config[:connection]
-          connection = {
-            connection: config[:connection]
-          }
-        else
-          port = config[:port] || 8123
-          connection = {
-            host: config[:host] || 'localhost',
-            port: port,
-            ssl: config[:ssl].present? ? config[:ssl] : port == 443,
-            sslca: config[:sslca],
-            read_timeout: config[:read_timeout],
-            write_timeout: config[:write_timeout],
-            keep_alive_timeout: config[:keep_alive_timeout]
-          }
-        end
-
-        if config.key?(:database)
-          database = config[:database]
-        else
+        unless config.key?(:database)
           raise ArgumentError, 'No database specified. Missing argument: database.'
         end
 
-        ConnectionAdapters::ClickhouseAdapter.new(logger, connection, config)
+        if config[:http_auth]
+          unless ConnectionAdapters::Clickhouse::SchemaStatements::HTTP_AUTH_TYPES.include?(config[:http_auth]&.to_sym)
+            raise ArgumentError, "Unknown :http_auth mode #{config[:http_auth].inspect}. " \
+              + "Use one of #{ConnectionAdapters::Clickhouse::SchemaStatements::HTTP_AUTH_TYPES}."
+          end
+        end
+
+        ConnectionAdapters::ClickhouseAdapter.new(config)
       end
     end
   end
@@ -64,7 +58,12 @@ module ActiveRecord
 
   module ModelSchema
     module ClassMethods
-      delegate :final, :final!, :settings, :settings!, to: :all
+      delegate :final, :final!,
+               :group_by_grouping_sets, :group_by_grouping_sets!,
+               :settings, :settings!,
+               :window, :window!,
+               :limit_by, :limit_by!,
+               to: :all
 
       def is_view
         @is_view || false
@@ -82,12 +81,17 @@ module ActiveRecord
   end
 
   module ConnectionAdapters
-    class ClickhouseColumn < Column
 
+    if ActiveRecord::version >= Gem::Version.new('7.2')
+      register "clickhouse", "ActiveRecord::ConnectionAdapters::ClickhouseAdapter", "active_record/connection_adapters/clickhouse_adapter"
     end
 
     class ClickhouseAdapter < AbstractAdapter
+      include Clickhouse::Quoting
+
       ADAPTER_NAME = 'Clickhouse'.freeze
+      DEFAULT_RESPONSE_FORMAT = 'JSONCompactEachRowWithNamesAndTypes'.freeze
+      USER_AGENT = "ClickHouse ActiveRecord #{ClickhouseActiverecord::VERSION}"
       NATIVE_DATABASE_TYPES = {
         string: { name: 'String' },
         integer: { name: 'UInt32' },
@@ -116,21 +120,61 @@ module ActiveRecord
         uint64: { name: 'UInt64' },
         # uint128: { name: 'UInt128' }, not yet implemented in clickhouse
         uint256: { name: 'UInt256' },
+
+        json: { name: 'JSON' },
       }.freeze
 
       include Clickhouse::SchemaStatements
 
       # Initializes and connects a Clickhouse adapter.
-      def initialize(logger, connection_parameters, config)
-        super(nil, logger)
-        @connection_parameters = connection_parameters
-        @connection_config = { user: config[:username], password: config[:password], database: config[:database] }.compact
-        @debug = config[:debug] || false
-        @config = config
+      def initialize(config_or_deprecated_connection, deprecated_logger = nil, deprecated_connection_options = nil, deprecated_config = nil)
+        super
+        if @config[:connection]
+          connection = {
+            connection: @config[:connection]
+          }
+        else
+          port = @config[:port] || 8123
+          connection = {
+            host: @config[:host] || 'localhost',
+            port: port,
+            ssl: @config[:ssl].present? ? @config[:ssl] : port == 443,
+            sslca: @config[:sslca],
+            read_timeout: @config[:read_timeout],
+            write_timeout: @config[:write_timeout],
+            keep_alive_timeout: @config[:keep_alive_timeout]
+          }
+        end
+        @connection_parameters = connection
+
+        @connection_config = { user: @config[:username], password: @config[:password], database: @config[:database] }.compact
+        @debug = @config[:debug] || false
+        @response_format = @config[:format] || DEFAULT_RESPONSE_FORMAT
+        @http_auth = @config[:http_auth]&.to_sym
 
         @prepared_statements = false
 
         connect
+      end
+
+      def disconnect!
+        @connection.finish if @connection&.started?
+        super
+      end
+
+      # Return ClickHouse server version
+      def server_version
+        @server_version ||= select_value('SELECT version()')
+      end
+
+      # Savepoints are not supported, noop
+      def create_savepoint(name)
+      end
+
+      def exec_rollback_to_savepoint(name)
+      end
+
+      def release_savepoint(name)
       end
 
       def migrations_paths
@@ -166,6 +210,8 @@ module ActiveRecord
               nil
             when /(Nullable)?\(?U?Int64\)?/
               8
+            when /(Nullable)?\(?U?Int128\)?/
+              16
             else
               super
           end
@@ -211,6 +257,12 @@ module ActiveRecord
           m.register_type(%r(Array)) do |sql_type|
             Clickhouse::OID::Array.new(sql_type)
           end
+
+          m.register_type(%r(Map)) do |sql_type|
+            Clickhouse::OID::Map.new(sql_type)
+          end
+
+          m.register_type %r(JSON)i, ActiveRecord::Type::Json.new
         end
       end
 
@@ -223,6 +275,8 @@ module ActiveRecord
         case value
         when Array
           '[' + value.map { |v| quote(v) }.join(', ') + ']'
+        when Hash
+          '{' + value.map { |k, v| "#{quote(k)}: #{quote(v)}" }.join(', ') + '}'
         else
           super
         end
@@ -251,10 +305,15 @@ module ActiveRecord
 
       # SCHEMA STATEMENTS ========================================
 
-      def primary_key(table_name) #:nodoc:
+      def primary_keys(table_name)
+        if server_version.to_f >= 23.4
+          structure = do_system_execute("SHOW COLUMNS FROM `#{table_name}`")
+          return structure['data'].select {|m| m[3]&.include?('PRI') }.pluck(0)
+        end
+
         pk = table_structure(table_name).first
-        return 'id' if pk.present? && pk[0] == 'id'
-        false
+        return ['id'] if pk.present? && pk.name == 'id'
+        []
       end
 
       def create_schema_dumper(options) # :nodoc:
@@ -262,21 +321,20 @@ module ActiveRecord
       end
 
       # @param [String] table
+      # @option [Boolean] single_line
       # @return [String]
-      def show_create_table(table)
-        do_system_execute("SHOW CREATE TABLE `#{table}`")['data'].try(:first).try(:first).gsub(/[\n\s]+/m, ' ').gsub("#{@config[:database]}.", "")
+      def show_create_table(table, single_line: true)
+        sql = do_system_execute("SHOW CREATE TABLE `#{table}`")['data'].try(:first).try(:first).gsub("#{@config[:database]}.", '')
+        single_line ? sql.squish : sql
       end
 
       # Create a new ClickHouse database.
       def create_database(name)
         sql = apply_cluster "CREATE DATABASE #{quote_table_name(name)}"
-        log_with_debug(sql, adapter_name) do
-          res = @connection.post("/?#{@connection_config.except(:database).to_param}", sql)
-          process_response(res, DEFAULT_RESPONSE_FORMAT)
-        end
+        do_system_execute sql, adapter_name, except_params: [:database]
       end
 
-      def create_view(table_name, **options)
+      def create_view(table_name, request_settings: {}, **options)
         options.merge!(view: true)
         options = apply_replica(table_name, options)
         td = create_table_definition(apply_cluster(table_name), **options)
@@ -286,10 +344,10 @@ module ActiveRecord
           drop_table(table_name, options.merge(if_exists: true))
         end
 
-        do_execute(schema_creation.accept(td), format: nil)
+        execute(schema_creation.accept(td), settings: request_settings)
       end
 
-      def create_table(table_name, **options, &block)
+      def create_table(table_name, request_settings: {}, **options, &block)
         options = apply_replica(table_name, options)
         td = create_table_definition(apply_cluster(table_name), **options)
         block.call td if block_given?
@@ -303,7 +361,7 @@ module ActiveRecord
           drop_table(table_name, options.merge(if_exists: true))
         end
 
-        do_execute(schema_creation.accept(td), format: nil)
+        execute(schema_creation.accept(td), settings: request_settings)
 
         if options[:with_distributed]
           distributed_table_name = options.delete(:with_distributed)
@@ -316,18 +374,15 @@ module ActiveRecord
         end
       end
 
-      def create_function(name, body)
-        fd = "CREATE FUNCTION #{apply_cluster(quote_table_name(name))} AS #{body}"
-        do_execute(fd, format: nil)
+      def create_function(name, body, **options)
+        fd = "CREATE#{' OR REPLACE' if options[:force]} FUNCTION #{apply_cluster(quote_table_name(name))} AS #{body}"
+        execute(fd)
       end
 
       # Drops a ClickHouse database.
       def drop_database(name) #:nodoc:
         sql = apply_cluster "DROP DATABASE IF EXISTS #{quote_table_name(name)}"
-        log_with_debug(sql, adapter_name) do
-          res = @connection.post("/?#{@connection_config.except(:database).to_param}", sql)
-          process_response(res, DEFAULT_RESPONSE_FORMAT)
-        end
+        do_system_execute sql, adapter_name, except_params: [:database]
       end
 
       def drop_functions
@@ -337,7 +392,7 @@ module ActiveRecord
       end
 
       def rename_table(table_name, new_name)
-        do_execute apply_cluster "RENAME TABLE #{quote_table_name(table_name)} TO #{quote_table_name(new_name)}"
+        execute apply_cluster "RENAME TABLE #{quote_table_name(table_name)} TO #{quote_table_name(new_name)}"
       end
 
       def drop_table(table_name, options = {}) # :nodoc:
@@ -347,7 +402,7 @@ module ActiveRecord
         query = apply_cluster(query)
         query = "#{query} SYNC" if options[:sync]
 
-        do_execute(query)
+        execute(query)
 
         if options[:with_distributed]
           distributed_table_name = options.delete(:with_distributed)
@@ -362,32 +417,26 @@ module ActiveRecord
         query = apply_cluster(query)
         query = "#{query} SYNC" if options[:sync]
 
-        do_execute(query, format: nil)
+        execute(query)
       end
 
       def add_column(table_name, column_name, type, **options)
-        return if options[:if_not_exists] == true && column_exists?(table_name, column_name, type)
-
-        at = create_alter_table table_name
-        at.add_column(column_name, type, **options)
-        execute(schema_creation.accept(at), nil, settings: {wait_end_of_query: 1, send_progress_in_http_headers: 1})
+        with_settings(wait_end_of_query: 1, send_progress_in_http_headers: 1) { super }
       end
 
       def remove_column(table_name, column_name, type = nil, **options)
-        return if options[:if_exists] == true && !column_exists?(table_name, column_name)
-
-        execute("ALTER TABLE #{quote_table_name(table_name)} #{remove_column_for_alter(table_name, column_name, type, **options)}", nil, settings: {wait_end_of_query: 1, send_progress_in_http_headers: 1})
+        with_settings(wait_end_of_query: 1, send_progress_in_http_headers: 1) { super }
       end
 
       def change_column(table_name, column_name, type, **options)
-        result = do_execute("ALTER TABLE #{quote_table_name(table_name)} #{change_column_for_alter(table_name, column_name, type, **options)}", nil, settings: {wait_end_of_query: 1, send_progress_in_http_headers: 1})
+        result = execute("ALTER TABLE #{quote_table_name(table_name)} #{change_column_for_alter(table_name, column_name, type, **options)}", nil, settings: {wait_end_of_query: 1, send_progress_in_http_headers: 1})
         raise "Error parse json response: #{result}" if result.presence && !result.is_a?(Hash)
       end
 
       def change_column_null(table_name, column_name, null, default = nil)
-        structure = table_structure(table_name).select{|v| v[0] == column_name.to_s}.first
+        structure = table_structure(table_name).find { |col| col.name == column_name.to_s }
         raise "Column #{column_name} not found in table #{table_name}" if structure.nil?
-        change_column table_name, column_name, structure[1].gsub(/(Nullable\()?(.*?)\)?/, '\2'), {null: null, default: default}.compact
+        change_column table_name, column_name, structure.sql_type.gsub(/(Nullable\()?(.*?)\)?/, '\2'), {null: null, default: default}.compact
       end
 
       def change_column_default(table_name, column_name, default)
@@ -439,6 +488,13 @@ module ActiveRecord
         @config[:database]
       end
 
+      # Returns the shard name from the configuration.
+      # This is used to identify the shard in replication paths when using both sharding and replication.
+      # Required when you have multiple shards with replication to ensure unique paths for each shard's replication metadata.
+      def shard
+        @config[:shard_name]
+      end
+
       def use_default_replicated_merge_tree_params?
         database_engine_atomic? && @config[:use_default_replicated_merge_tree_params]
       end
@@ -447,8 +503,17 @@ module ActiveRecord
         (replica || use_default_replicated_merge_tree_params?) && cluster
       end
 
+      # Returns the path for replication metadata.
+      # When sharding is enabled (shard_name is set), the path includes the shard identifier
+      # to ensure unique paths for each shard's replication metadata.
+      # Format with sharding: /clickhouse/tables/{cluster}/{shard}/{database}.{table}
+      # Format without sharding: /clickhouse/tables/{cluster}/{database}.{table}
       def replica_path(table)
-        "/clickhouse/tables/#{cluster}/#{@connection_config[:database]}.#{table}"
+        if shard
+          "/clickhouse/tables/#{cluster}/#{shard}/#{@connection_config[:database]}.#{table}"
+        else
+          "/clickhouse/tables/#{cluster}/#{@connection_config[:database]}.#{table}"
+        end
       end
 
       def database_engine_atomic?
@@ -505,6 +570,10 @@ module ActiveRecord
         @connection.keep_alive_timeout = @connection_parameters[:keep_alive_timeout] || 10
 
         @connection
+      end
+
+      def reconnect
+        connect
       end
 
       def apply_replica(table, options)

@@ -14,32 +14,46 @@ jobs:
     env:
       CLICKHOUSE_PORT: 18123
       CLICKHOUSE_DATABASE: default
+      CLICKHOUSE_USER: test
+      CLICKHOUSE_PASSWORD: test
 
     strategy:
       fail-fast: true
       max-parallel: 1
       matrix:
-        ruby-version: [ '2.7', '3.0', '3.2' ]
-        clickhouse: [ '22.1' ]
+        version:
+          - ruby: 3.2
+            rails: 7.2.3
+          - ruby: 3.2
+            rails: 8.0.1
+          - ruby: 3.2
+            rails: 8.1
+          - ruby: 4.0
+            rails: 7.2.3
+          - ruby: 4.0
+            rails: 8.1
+        clickhouse: [ '24.6', '24.9', '25.10' ]
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Start ClickHouse ${{ matrix.clickhouse }}
-        uses: isbang/compose-action@v1.5.1
+        uses: hoverkraft-tech/compose-action@v2.5.0
         env:
           CLICKHOUSE_VERSION: ${{ matrix.clickhouse }}
         with:
           compose-file: '.docker/docker-compose.yml'
           down-flags: '--volumes'
 
-      - name: Set up Ruby ${{ matrix.ruby-version }}
+      - run: echo 'gem "activerecord", "~> ${{ matrix.version.rails }}"' >> Gemfile
+
+      - name: Set up Ruby ${{ matrix.version.ruby }}
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: ${{ matrix.ruby-version }}
+          ruby-version: ${{ matrix.version.ruby }}
           bundler-cache: true
 
-      - run: bundle exec rspec spec/single
+      - run: bundle exec rspec spec/single --format progress
 
   tests_cluster:
     name: Testing cluster server
@@ -49,29 +63,41 @@ jobs:
       CLICKHOUSE_PORT: 28123
       CLICKHOUSE_DATABASE: default
       CLICKHOUSE_CLUSTER: test_cluster
+      CLICKHOUSE_USER: test
+      CLICKHOUSE_PASSWORD: test
 
     strategy:
       fail-fast: true
       max-parallel: 1
       matrix:
-        ruby-version: [ '2.7', '3.0', '3.2' ]
-        clickhouse: [ '22.1' ]
+        version:
+          - ruby: 3.2
+            rails: 7.2.1
+          - ruby: 3.2
+            rails: 8.0.1
+          - ruby: 3.2
+            rails: 8.1
+          - ruby: 4.0
+            rails: 8.1
+        clickhouse: [ '24.9', '25.10' ]
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Start ClickHouse Cluster ${{ matrix.clickhouse }}
-        uses: isbang/compose-action@v1.5.1
+        uses: hoverkraft-tech/compose-action@v2.5.0
         env:
           CLICKHOUSE_VERSION: ${{ matrix.clickhouse }}
         with:
           compose-file: '.docker/docker-compose.cluster.yml'
           down-flags: '--volumes'
 
-      - name: Set up Ruby ${{ matrix.ruby-version }}
+      - run: echo 'gem "activerecord", "~> ${{ matrix.version.rails }}"' >> Gemfile
+
+      - name: Set up Ruby ${{ matrix.version.ruby }}
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: ${{ matrix.ruby-version }}
+          ruby-version: ${{ matrix.version.ruby }}
           bundler-cache: true
 
-      - run: bundle exec rspec spec/cluster
+      - run: bundle exec rspec spec/cluster --format progress

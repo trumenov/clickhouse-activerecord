@@ -14,39 +14,25 @@ module ClickhouseActiverecord
 
     private
 
-    def header(stream)
-      stream.puts <<HEADER
-# This file is auto-generated from the current state of the database. Instead
-# of editing this file, please use the migrations feature of Active Record to
-# incrementally modify your database, and then regenerate this schema definition.
-#
-# This file is the source Rails uses to define your schema when running `rails
-# #{simple ? 'db' : 'clickhouse'}:schema:load`. When creating a new database, `rails #{simple ? 'db' : 'clickhouse'}:schema:load` tends to
-# be faster and is potentially less error prone than running all of your
-# migrations from scratch. Old migrations may fail to apply correctly if those
-# migrations use external dependencies or application code.
-#
-# It's strongly recommended that you check this file into your version control system.
-
-#{simple ? 'ActiveRecord' : 'ClickhouseActiverecord'}::Schema.define(#{define_params}) do
-
-HEADER
-    end
-
     def tables(stream)
-      functions = @connection.functions
+      functions = @connection.functions.sort
       functions.each do |function|
         function(function, stream)
       end
 
-      sorted_tables = @connection.tables.sort {|a,b| @connection.show_create_table(a).match(/^CREATE\s+(MATERIALIZED\s+)?VIEW/) ? 1 : a <=> b }
-      sorted_tables.each do |table_name|
+      view_tables = @connection.views.sort
+      materialized_view_tables = @connection.materialized_views.sort
+      sorted_tables = @connection.tables.sort - view_tables - materialized_view_tables
+
+      (sorted_tables + view_tables + materialized_view_tables).each do |table_name|
         table(table_name, stream) unless ignored?(table_name)
       end
     end
 
     def table(table, stream)
       if table.match(/^\.inner/).nil?
+        sql= ""
+        simple ||= ENV['simple'] == 'true'
         unless simple
           stream.puts "  # TABLE: #{table}"
           sql = @connection.show_create_table(table)
@@ -54,7 +40,7 @@ HEADER
           # super(table.gsub(/^\.inner\./, ''), stream)
 
           # detect view table
-          match = sql.match(/^CREATE\s+(MATERIALIZED\s+)?VIEW/)
+          view_match = sql.match(/^CREATE\s+(MATERIALIZED\s+)?VIEW\s+\S+\s+(?:TO (\S+))?/)
         end
 
         # Copy from original dumper
@@ -69,20 +55,16 @@ HEADER
 
           unless simple
             # Add materialize flag
-            tbl.print ', view: true' if match
-            tbl.print ', materialized: true' if match && match[1].presence
+            tbl.print ', view: true' if view_match
+            tbl.print ', materialized: true' if view_match && view_match[1].presence
+            tbl.print ", to: \"#{view_match[2]}\"" if view_match && view_match[2].presence
           end
 
-          case pk
-          when String
-            tbl.print ", primary_key: #{pk.inspect}" unless pk == "id"
-            pkcol = columns.detect { |c| c.name == pk }
-            pkcolspec = column_spec_for_primary_key(pkcol)
-            if pkcolspec.present?
-              tbl.print ", #{format_colspec(pkcolspec)}"
+          if (id = columns.detect { |c| c.name == 'id' })
+            spec = column_spec_for_primary_key(id)
+            if spec.present?
+              tbl.print ", #{format_colspec(spec)}"
             end
-          when Array
-            tbl.print ", primary_key: #{pk.inspect}"
           else
             tbl.print ", id: false"
           end
@@ -99,14 +81,20 @@ HEADER
           tbl.puts ", force: :cascade do |t|"
 
           # then dump all non-primary key columns
-          if simple || !match
+          if simple || !view_match
             columns.each do |column|
               raise StandardError, "Unknown type '#{column.sql_type}' for column '#{column.name}'" unless @connection.valid_type?(column.type)
-              next if column.name == pk
-              type, colspec = column_spec(column)
+              next if column.name == pk && column.name == "id"
               name = column.name =~ (/\./) ? "\"`#{column.name}`\"" : column.name.inspect
-              tbl.print "    t.#{type} #{name}"
-              tbl.print ", #{format_colspec(colspec)}" if colspec.present?
+              if column.sql_type.match?(/^(Simple)?AggregateFunction/)
+                tbl.print "    t.column #{name}, #{column.sql_type.inspect}"
+                colspec = prepare_column_options(column)
+                tbl.print ", #{format_colspec(colspec)}" if colspec.present?
+              else
+                type, colspec = column_spec(column)
+                tbl.print "    t.#{type} #{name}"
+                tbl.print ", #{format_colspec(colspec)}" if colspec.present?
+              end
               tbl.puts
             end
           end
@@ -132,11 +120,23 @@ HEADER
       end
     end
 
+    def column_spec_for_primary_key(column)
+      spec = super
+
+      id = ActiveRecord::ConnectionAdapters::ClickhouseAdapter::NATIVE_DATABASE_TYPES.invert[{name: column.sql_type.gsub(/\(\d+\)/, "")}]
+      spec[:id] = id.inspect if id.present?
+
+      spec.except!(:limit, :unsigned) # This can be removed at some date, it is only here to clean up existing schemas which have dumped these values already
+    end
+
     def function(function, stream)
       stream.puts "  # FUNCTION: #{function}"
       sql = @connection.show_create_function(function)
-      stream.puts "  # SQL: #{sql}" if sql
-      stream.puts "  create_function \"#{function}\", \"#{sql.gsub(/^CREATE FUNCTION (.*?) AS/, '').strip}\"" if sql
+      if sql
+        stream.puts "  # SQL: #{sql}"
+        stream.puts "  create_function \"#{function}\", \"#{sql.sub(/\ACREATE(OR REPLACE)? FUNCTION .*? AS/, '').strip}\", force: true"
+        stream.puts
+      end
     end
 
     def format_options(options)
@@ -165,18 +165,32 @@ HEADER
     end
 
     def schema_array(column)
-      (column.sql_type =~ /Array?\(/).nil? ? nil : true
+      (column.sql_type =~ /Array\(/).nil? ? nil : true
+    end
+
+    def schema_map(column)
+      if column.sql_type =~ /Map\(([^,]+),\s*(Array)\)/
+        return :array
+      end
+
+      (column.sql_type =~ /Map\(/).nil? ? nil : true
     end
 
     def schema_low_cardinality(column)
-      (column.sql_type =~ /LowCardinality?\(/).nil? ? nil : true
+      (column.sql_type =~ /LowCardinality\(/).nil? ? nil : true
     end
 
+    # @param [ActiveRecord::ConnectionAdapters::Clickhouse::Column] column
     def prepare_column_options(column)
       spec = {}
       spec[:unsigned] = schema_unsigned(column)
       spec[:array] = schema_array(column)
+      spec[:map] = schema_map(column)
+      if spec[:map] == :array
+        spec[:array] = nil
+      end
       spec[:low_cardinality] = schema_low_cardinality(column)
+      spec[:codec] = column.codec.inspect if column.codec
       spec.merge(super).compact
     end
 

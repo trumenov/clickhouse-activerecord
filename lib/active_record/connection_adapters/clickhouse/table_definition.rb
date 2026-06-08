@@ -41,7 +41,7 @@ module ActiveRecord
           unsigned = options[:unsigned]
           unsigned = true if unsigned.nil?
 
-          kind = :uint32 # default
+          kind = unsigned ? :uint32 : :int32 # default
 
           if options[:limit]
             if unsigned
@@ -94,10 +94,15 @@ module ActiveRecord
           args.each { |name| column(name, kind, **options.except(:limit)) }
         end
 
+        def column(name, type, index: nil, **options)
+          options[:null] = false if type.match?(/Nullable\([^)]+\)/)
+          super(name, type, index: index, **options)
+        end
+
         private
 
         def valid_column_definition_options
-          super + [:array, :low_cardinality, :fixed_string, :value, :type]
+          super + [:array, :low_cardinality, :fixed_string, :value, :type, :map, :codec, :unsigned]
         end
       end
 
