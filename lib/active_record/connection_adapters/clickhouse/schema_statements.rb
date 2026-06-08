@@ -42,7 +42,7 @@ module ActiveRecord
         def execute(sql, name = nil, format: @response_format, settings: {})
           with_response_format(format) do
             log(sql, [adapter_name, name].compact.join(' ')) do
-              raw_execute(sql, settings: settings)
+              raw_execute(resolve_hidden_credentials(sql), settings: settings)
             end
           end
         end
@@ -297,7 +297,7 @@ module ActiveRecord
         end
 
         def raw_execute_with_retry(sql, settings: {}, except_params: [])
-          resolved_sql = resolve_hidden_credentials(sql)
+          resolved_sql = sql
           retries_count = (@config || {}).fetch(:request_retries_on_fail, 1).to_i
           retries_count = 1 unless retries_count&.positive?
           result = nil
