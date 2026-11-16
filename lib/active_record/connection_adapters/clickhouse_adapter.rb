@@ -185,6 +185,12 @@ module ActiveRecord
         !native_database_types[type].nil?
       end
 
+      def type_to_sql(type, limit: nil, precision: nil, scale: nil, **options)
+        return "DateTime64(#{precision})" if type.to_s == 'datetime64' && precision
+
+        super
+      end
+
       def supports_indexes_in_create?
         true
       end

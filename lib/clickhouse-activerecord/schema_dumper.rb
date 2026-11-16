@@ -170,6 +170,12 @@ module ClickhouseActiverecord
       super
     end
 
+    def schema_precision(column)
+      return column.precision.inspect if column.precision && column.sql_type.to_s.match?(/\A(?:Nullable\()?DateTime64\(/)
+
+      super
+    end
+
     def schema_unsigned(column)
       return nil unless column.type == :integer && !simple
       (column.sql_type =~ /(Nullable)?\(?UInt\d+\)?/).nil? ? false : nil

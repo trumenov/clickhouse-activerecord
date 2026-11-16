@@ -1,4 +1,5 @@
 require 'spec_helper'
+require 'clickhouse-activerecord/schema_dumper'
 
 RSpec.describe 'Schema Loading', :migrations do
   let(:model) { ActiveRecord::Base }
@@ -9,6 +10,39 @@ RSpec.describe 'Schema Loading', :migrations do
     allow_any_instance_of(ActiveRecord::MigrationContext).to receive(:migrations).
       and_return([double(version: 1)])
     ActiveRecord::Schema.define(version: 2) {}
+  end
+
+  describe 'DateTime64 precision' do
+    after do
+      connection.drop_table(:datetime64_precision_test, if_exists: true)
+      connection.drop_table(:datetime64_nullable_precision_test, if_exists: true)
+    end
+
+    it 'dumps and creates DateTime64 columns with the original precision' do
+      connection.create_table(:datetime64_precision_test, id: false, options: 'MergeTree ORDER BY id') do |t|
+        t.integer :id, null: false
+        t.datetime :updated_at, precision: 6, null: false
+      end
+
+      stream = StringIO.new
+      ClickhouseActiverecord::SchemaDumper.dump(connection, stream)
+
+      expect(stream.string).to include('t.datetime "updated_at", precision: 6, null: false')
+      expect(connection.columns(:datetime64_precision_test).find { |column| column.name == 'updated_at' }.sql_type).to eq('DateTime64(6)')
+    end
+
+    it 'dumps and creates nullable DateTime64 columns with the original precision' do
+      connection.create_table(:datetime64_nullable_precision_test, id: false, options: 'MergeTree ORDER BY id') do |t|
+        t.integer :id, null: false
+        t.datetime :updated_at, precision: 6
+      end
+
+      stream = StringIO.new
+      ClickhouseActiverecord::SchemaDumper.dump(connection, stream)
+
+      expect(stream.string).to match(/^    t\.datetime "updated_at", precision: 6$/)
+      expect(connection.columns(:datetime64_nullable_precision_test).find { |column| column.name == 'updated_at' }.sql_type).to eq('Nullable(DateTime64(6))')
+    end
   end
 
   describe 'assign_database_to_subquery' do
